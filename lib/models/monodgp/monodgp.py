@@ -61,7 +61,7 @@ class MonoDGP(nn.Module):
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
 
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 6, 3)
-        self.dim_embed_3d = MLP(hidden_dim, hidden_dim, 3, 2)
+        self.dim_embed_3d = MLP(hidden_dim, hidden_dim, 3, 4)
         self.angle_embed = MLP(hidden_dim, hidden_dim, 24, 2)
         self.depth_embed = MLP(hidden_dim, hidden_dim, 2, 2)  # depth and deviation
 
