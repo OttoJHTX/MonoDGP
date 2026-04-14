@@ -76,6 +76,7 @@ model:
   giou_loss_coef: 2
   3dcenter_loss_coef: 10
   dim_loss_coef: 1
+  height_loss_coef: 1
   angle_loss_coef: 1
   depth_loss_coef: 1
   depth_map_loss_coef: 1
