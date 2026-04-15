@@ -282,6 +282,8 @@ class MonoDGP(nn.Module):
         out['pred_angle'] = outputs_angle[-1]
         out['pred_depth_map_logits'] = pred_depth_map_logits
         out['pred_region_prob'] = region_probs
+        out['calibs'] = calibs
+        out['img_sizes'] = img_sizes
 
         out['inter_outputs'] = self._set_inter_loss(inter_class, inter_coord)
         
@@ -500,6 +502,115 @@ class SetCriterion(nn.Module):
 
         return losses
     
+    def loss_projection_alignment(self, outputs, targets, indices, num_boxes):
+        """
+        Projection-alignment loss (Section B of supplementary material).
+
+        Projects predicted 3D bounding boxes into 2D using camera intrinsics,
+        then penalizes the squared difference between the projected 2D box
+        and the predicted 2D bounding box.
+
+        L_pa = sum((B_2d - B_proj)^2)
+        """
+        idx = self._get_src_permutation_idx(indices)
+
+        # --- Predicted 2D boxes (from 2D head) ---
+        # pred_boxes: [cx_3d, cy_3d, l, r, t, b] normalized by img resolution
+        pred_boxes = outputs['pred_boxes'][idx]  # [M, 6]
+        cx, cy = pred_boxes[:, 0], pred_boxes[:, 1]
+        l, r, t, b = pred_boxes[:, 2], pred_boxes[:, 3], pred_boxes[:, 4], pred_boxes[:, 5]
+        # 2D box in normalized coords: [x1, y1, x2, y2]
+        box2d_x1 = cx - l
+        box2d_y1 = cy - t
+        box2d_x2 = cx + r
+        box2d_y2 = cy + b
+
+        # --- Predicted 3D properties ---
+        pred_dims = outputs['pred_3d_dim'][idx]  # [M, 3] -> [H, W, L]
+        pred_depth = outputs['pred_depth'][idx][:, 0]  # [M] -> Z
+        pred_angle_raw = outputs['pred_angle'][idx]  # [M, 24]
+
+        # Decode alpha from bin classification + residual (differentiable)
+        angle_cls = pred_angle_raw[:, :12]   # [M, 12]
+        angle_res = pred_angle_raw[:, 12:]   # [M, 12]
+        # Soft bin selection using softmax (differentiable alternative to argmax)
+        angle_weights = torch.softmax(angle_cls, dim=1)  # [M, 12]
+        angle_per_class = 2 * math.pi / 12.0
+        bin_centers = torch.arange(12, device=angle_cls.device, dtype=angle_cls.dtype) * angle_per_class  # [12]
+        # Weighted residual
+        weighted_res = (angle_weights * angle_res).sum(dim=1)  # [M]
+        weighted_center = (angle_weights * bin_centers.unsqueeze(0)).sum(dim=1)  # [M]
+        alpha = weighted_center + weighted_res  # [M]
+
+        # --- Camera parameters ---
+        calibs = outputs['calibs']  # [B, 3, 4]
+        img_sizes = outputs['img_sizes']  # [B, 2] -> [W, H]
+        batch_idx = idx[0]
+
+        fu = calibs[batch_idx, 0, 0]  # [M]
+        fv = calibs[batch_idx, 1, 1]  # [M]
+        cu = calibs[batch_idx, 0, 2]  # [M]
+        cv = calibs[batch_idx, 1, 2]  # [M]
+        img_w = img_sizes[batch_idx, 0]  # [M]
+        img_h = img_sizes[batch_idx, 1]  # [M]
+
+        # --- Convert projected 3D center (normalized) to pixel coords ---
+        cx_px = cx * img_w  # [M]
+        cy_px = cy * img_h  # [M]
+
+        # 3D center in camera coords: back-project from image
+        Z = pred_depth  # [M]
+        X = (cx_px - cu) * Z / fu  # [M]
+        Y = (cy_px - cv) * Z / fv  # [M]
+
+        # --- Convert alpha to rotation_y (ry) ---
+        ry = alpha + torch.atan2(cx_px - cu, fu)  # [M]
+
+        # --- Generate 8 corners of 3D box ---
+        h, w, ll = pred_dims[:, 0], pred_dims[:, 1], pred_dims[:, 2]  # [M]
+
+        # Rotation matrix around Y-axis
+        cos_ry = torch.cos(ry)
+        sin_ry = torch.sin(ry)
+
+        # 8 corners in object frame (before rotation):
+        # x: [-l/2, l/2], y: [-h, 0] (bottom at Y, top at Y-h), z: [-w/2, w/2]
+        # KITTI convention: Y points down, object center is at bottom
+        x_corners = torch.stack([ll/2, ll/2, -ll/2, -ll/2, ll/2, ll/2, -ll/2, -ll/2], dim=1)  # [M, 8]
+        y_corners = torch.stack([torch.zeros_like(h), torch.zeros_like(h),
+                                 torch.zeros_like(h), torch.zeros_like(h),
+                                 -h, -h, -h, -h], dim=1)  # [M, 8]
+        z_corners = torch.stack([w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2], dim=1)  # [M, 8]
+
+        # Rotate around Y-axis
+        x_rot = cos_ry.unsqueeze(1) * x_corners + sin_ry.unsqueeze(1) * z_corners  # [M, 8]
+        z_rot = -sin_ry.unsqueeze(1) * x_corners + cos_ry.unsqueeze(1) * z_corners  # [M, 8]
+
+        # Translate to camera frame
+        x_cam = x_rot + X.unsqueeze(1)  # [M, 8]
+        y_cam = y_corners + Y.unsqueeze(1)  # [M, 8]
+        z_cam = z_rot + Z.unsqueeze(1)  # [M, 8]
+
+        # --- Project to 2D ---
+        # Clamp Z to avoid division by zero
+        z_cam = torch.clamp(z_cam, min=1.0)
+        u_proj = fu.unsqueeze(1) * x_cam / z_cam + cu.unsqueeze(1)  # [M, 8]
+        v_proj = fv.unsqueeze(1) * y_cam / z_cam + cv.unsqueeze(1)  # [M, 8]
+
+        # Projected 2D box: min/max of projected corners, normalized
+        proj_x1 = u_proj.min(dim=1).values / img_w  # [M]
+        proj_x2 = u_proj.max(dim=1).values / img_w  # [M]
+        proj_y1 = v_proj.min(dim=1).values / img_h  # [M]
+        proj_y2 = v_proj.max(dim=1).values / img_h  # [M]
+
+        # --- Quadratic loss ---
+        loss_pa = ((box2d_x1 - proj_x1) ** 2 + (box2d_x2 - proj_x2) ** 2 +
+                   (box2d_y1 - proj_y1) ** 2 + (box2d_y2 - proj_y2) ** 2)
+
+        losses = {}
+        losses['loss_proj_align'] = loss_pa.sum() / num_boxes
+        return losses
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -524,6 +635,7 @@ class SetCriterion(nn.Module):
             'center': self.loss_3dcenter,
             'depth_map': self.loss_depth_map,
             'region': self.loss_region,
+            'proj_align': self.loss_projection_alignment,
         }
 
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
@@ -563,7 +675,7 @@ class SetCriterion(nn.Module):
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = self.matcher(aux_outputs, targets, group_num=group_num)
                 for loss in self.losses:
-                    if loss == 'depth_map' or loss == 'region':
+                    if loss in ('depth_map', 'region', 'proj_align'):
                         continue
                     kwargs = {}
                     if loss == 'labels':
@@ -626,6 +738,7 @@ def build(cfg):
     weight_dict['loss_center'] = cfg['3dcenter_loss_coef']
     weight_dict['loss_depth_map'] = cfg['depth_map_loss_coef']
     weight_dict['loss_region'] = cfg['region_loss_coef']
+    weight_dict['loss_proj_align'] = cfg['proj_align_loss_coef']
     
     if cfg['aux_loss']:
         aux_weight_dict = {}
@@ -642,7 +755,7 @@ def build(cfg):
     weight_dict.update(inter_weight_dict)
         
     inter_losses = ['labels', 'boxes', 'center']
-    losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'angles', 'center', 'depth_map', 'region']
+    losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'angles', 'center', 'depth_map', 'region', 'proj_align']
 
     criterion = SetCriterion(
         cfg['num_classes'],
