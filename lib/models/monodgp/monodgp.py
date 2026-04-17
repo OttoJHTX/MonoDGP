@@ -537,10 +537,11 @@ class SetCriterion(nn.Module):
         angle_weights = torch.softmax(angle_cls, dim=1)  # [M, 12]
         angle_per_class = 2 * math.pi / 12.0
         bin_centers = torch.arange(12, device=angle_cls.device, dtype=angle_cls.dtype) * angle_per_class  # [12]
-        # Weighted residual
-        weighted_res = (angle_weights * angle_res).sum(dim=1)  # [M]
-        weighted_center = (angle_weights * bin_centers.unsqueeze(0)).sum(dim=1)  # [M]
-        alpha = weighted_center + weighted_res  # [M]
+        # Circular mean via sin/cos to handle wrap-around correctly
+        theta_per_bin = bin_centers.unsqueeze(0) + angle_res  # [M, 12]
+        sin_alpha = (angle_weights * torch.sin(theta_per_bin)).sum(dim=1)  # [M]
+        cos_alpha = (angle_weights * torch.cos(theta_per_bin)).sum(dim=1)  # [M]
+        alpha = torch.atan2(sin_alpha, cos_alpha)  # [M], in [-pi, pi]
 
         # --- Camera parameters ---
         calibs = outputs['calibs']  # [B, 3, 4]
@@ -573,13 +574,13 @@ class SetCriterion(nn.Module):
         cos_ry = torch.cos(ry)
         sin_ry = torch.sin(ry)
 
-        # 8 corners in object frame (before rotation):
-        # x: [-l/2, l/2], y: [-h, 0] (bottom at Y, top at Y-h), z: [-w/2, w/2]
-        # KITTI convention: Y points down, object center is at bottom
+        # 8 corners in object frame (before rotation), centered on geometric center:
+        # x: [-l/2, l/2], y: [h/2, -h/2] (bottom at +h/2, top at -h/2), z: [-w/2, w/2]
+        # Note: (X, Y, Z) is the geometric center (not KITTI bottom-center), so
+        # corners must be symmetric around origin in Y.
         x_corners = torch.stack([ll/2, ll/2, -ll/2, -ll/2, ll/2, ll/2, -ll/2, -ll/2], dim=1)  # [M, 8]
-        y_corners = torch.stack([torch.zeros_like(h), torch.zeros_like(h),
-                                 torch.zeros_like(h), torch.zeros_like(h),
-                                 -h, -h, -h, -h], dim=1)  # [M, 8]
+        y_corners = torch.stack([h/2, h/2, h/2, h/2,
+                                 -h/2, -h/2, -h/2, -h/2], dim=1)  # [M, 8]
         z_corners = torch.stack([w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2], dim=1)  # [M, 8]
 
         # Rotate around Y-axis
