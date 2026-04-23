@@ -14,7 +14,7 @@ from lib.helpers.model_helper import build_model
 
 CUDA_VISIBLE_DEVICES=0
 
-cfg = yaml.load(open('./configs/monodgp.yaml', 'r'), Loader=yaml.Loader)
+cfg = yaml.load(open(os.path.join(ROOT_DIR, 'configs/monodgp.yaml'), 'r'), Loader=yaml.Loader)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model, loss = build_model(cfg['model'])
