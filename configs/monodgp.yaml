@@ -78,6 +78,7 @@ model:
   dim_loss_coef: 1
   angle_loss_coef: 1
   depth_loss_coef: 1
+  height_bin_loss_coef: 1
   depth_map_loss_coef: 1
   region_loss_coef: 1
 
@@ -108,7 +109,7 @@ trainer:
   accumulation_steps: 2  # effective batch size = batch_size * accumulation_steps
   #resume_model: True
   #pretrain_model: path/to/ckpt
-  save_path: 'outputs/baseline_100_gradient_accumulation'
+  save_path: 'outputs/subclass-height-residual-estimation'
   save_all: False  # False for only savng the best and latest ckpts
   use_dn: False
   scalar: 5

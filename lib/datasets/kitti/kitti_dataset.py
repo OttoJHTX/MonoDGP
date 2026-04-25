@@ -24,6 +24,7 @@ from lib.datasets.kitti.pd import PhotometricDistort
 
 from lib.datasets.utils import angle2class
 from lib.datasets.utils import gaussian_radius
+from lib.models.monodgp.height_bins import NUM_HEIGHT_BINS, HEIGHT_BIN_EDGES, HEIGHT_BIN_CENTERS
 from lib.datasets.utils import draw_umich_gaussian
 from lib.datasets.kitti.kitti_utils import get_objects_from_label
 from lib.datasets.kitti.kitti_utils import Calibration
@@ -269,6 +270,8 @@ class KITTI_Dataset(data.Dataset):
         depth = np.zeros((self.max_objs, 1), dtype=np.float32)
         heading_bin = np.zeros((self.max_objs, 1), dtype=np.int64)
         heading_res = np.zeros((self.max_objs, 1), dtype=np.float32)
+        height_bin = np.zeros((self.max_objs, 1), dtype=np.int64)
+        height_res = np.zeros((self.max_objs, 1), dtype=np.float32)
         size_2d = np.zeros((self.max_objs, 2), dtype=np.float32) 
         size_3d = np.zeros((self.max_objs, 3), dtype=np.float32)
         src_size_3d = np.zeros((self.max_objs, 3), dtype=np.float32)
@@ -382,6 +385,11 @@ class KITTI_Dataset(data.Dataset):
             src_size_3d[i] = np.array([objects[i].h, objects[i].w, objects[i].l], dtype=np.float32)
             mean_size = self.cls_mean_size[self.cls2id[objects[i].cls_type]]
             size_3d[i] = src_size_3d[i] - mean_size
+
+            # encoding height bin
+            h_bin_idx = np.clip(np.digitize(objects[i].h, HEIGHT_BIN_EDGES), 0, NUM_HEIGHT_BINS - 1)
+            height_bin[i] = h_bin_idx
+            height_res[i] = objects[i].h - HEIGHT_BIN_CENTERS[h_bin_idx]
 
             if objects[i].trucation <= 0.5 and objects[i].occlusion <= 2:
                 mask_2d[i] = 1
@@ -497,6 +505,10 @@ class KITTI_Dataset(data.Dataset):
                     mean_size = self.cls_mean_size[self.cls2id[objects[i].cls_type]]
                     size_3d[i + object_num] = src_size_3d[i + object_num] - mean_size
 
+                    h_bin_idx = np.clip(np.digitize(objects[i].h, HEIGHT_BIN_EDGES), 0, NUM_HEIGHT_BINS - 1)
+                    height_bin[i + object_num] = h_bin_idx
+                    height_res[i + object_num] = objects[i].h - HEIGHT_BIN_CENTERS[h_bin_idx]
+
                     if objects[i].trucation <=0.5 and objects[i].occlusion<=2:
                         mask_2d[i + object_num] = 1
                     
@@ -518,6 +530,8 @@ class KITTI_Dataset(data.Dataset):
                    'src_size_3d': src_size_3d,
                    'heading_bin': heading_bin,
                    'heading_res': heading_res,
+                   'height_bin': height_bin,
+                   'height_res': height_res,
                    'mask_2d': mask_2d,
                    'obj_region': obj_region}
 

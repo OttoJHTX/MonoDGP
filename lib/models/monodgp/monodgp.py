@@ -19,6 +19,7 @@ from .depth_predictor import DepthPredictor
 from .depth_predictor.ddn_loss import DDNLoss
 from lib.losses.focal_loss import sigmoid_focal_loss
 from .position_encoding import PositionEmbeddingCamRay
+from .height_bins import NUM_HEIGHT_BINS, HEIGHT_BIN_CENTERS_TENSOR
 
 
 def _get_clones(module, N):
@@ -61,7 +62,8 @@ class MonoDGP(nn.Module):
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
 
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 6, 3)
-        self.dim_embed_3d = MLP(hidden_dim, hidden_dim, 3, 2)
+        self.dim_embed_3d = MLP(hidden_dim, hidden_dim, 2, 2)  # W, L only
+        self.height_bin_embed = MLP(hidden_dim, hidden_dim, NUM_HEIGHT_BINS * 2, 2)
         self.angle_embed = MLP(hidden_dim, hidden_dim, 24, 2)
         self.depth_embed = MLP(hidden_dim, hidden_dim, 2, 2)  # depth and deviation
 
@@ -112,6 +114,7 @@ class MonoDGP(nn.Module):
             self.det3d_transformer.decoder.bbox_embed = self.bbox_embed
             
             self.dim_embed_3d = _get_clones(self.dim_embed_3d, num_pred)
+            self.height_bin_embed = _get_clones(self.height_bin_embed, num_pred)
             self.angle_embed = _get_clones(self.angle_embed, num_pred)
             self.depth_embed = _get_clones(self.depth_embed, num_pred)
         else:
@@ -119,6 +122,7 @@ class MonoDGP(nn.Module):
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
             self.dim_embed_3d = nn.ModuleList([self.dim_embed_3d for _ in range(num_pred)])
+            self.height_bin_embed = nn.ModuleList([self.height_bin_embed for _ in range(num_pred)])
             self.angle_embed = nn.ModuleList([self.angle_embed for _ in range(num_pred)])
             self.depth_embed = nn.ModuleList([self.depth_embed for _ in range(num_pred)])
             self.depthaware_transformer.decoder.bbox_embed = None
@@ -210,9 +214,12 @@ class MonoDGP(nn.Module):
 
         outputs_coords = []
         outputs_classes = []
-        outputs_3d_dims = []       
+        outputs_3d_dims = []
         outputs_depths = []
         outputs_angles = []
+        outputs_height_bins = []
+
+        bin_centers = HEIGHT_BIN_CENTERS_TENSOR.to(hs.device)
 
         for lvl in range(hs.shape[0]):
             if lvl == 0:
@@ -236,8 +243,17 @@ class MonoDGP(nn.Module):
             outputs_class = self.class_embed[lvl](hs[lvl])
             outputs_classes.append(outputs_class)
 
-            # 3D sizes
-            size3d = self.dim_embed_3d[lvl](hs[lvl])
+            # 3D sizes: W, L from dim head; H from height bin head
+            wl = self.dim_embed_3d[lvl](hs[lvl])  # [B, Q, 2]
+
+            height_bin_out = self.height_bin_embed[lvl](hs[lvl])  # [B, Q, NUM_BINS*2]
+            outputs_height_bins.append(height_bin_out)
+            h_logits = height_bin_out[:, :, :NUM_HEIGHT_BINS]
+            h_residuals = height_bin_out[:, :, NUM_HEIGHT_BINS:]
+            h_probs = F.softmax(h_logits, dim=-1)
+            height = (h_probs * (bin_centers + h_residuals)).sum(dim=-1, keepdim=True)  # [B, Q, 1]
+
+            size3d = torch.cat([height, wl], dim=-1)  # [B, Q, 3]
             outputs_3d_dims.append(size3d)
 
             # depth_geo_err
@@ -271,35 +287,35 @@ class MonoDGP(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
         outputs_class = torch.stack(outputs_classes)
         outputs_3d_dim = torch.stack(outputs_3d_dims)
-        outputs_depth = torch.stack(outputs_depths) 
+        outputs_depth = torch.stack(outputs_depths)
         outputs_angle = torch.stack(outputs_angles)
-  
+        outputs_height_bin = torch.stack(outputs_height_bins)
+
         out = dict()
         out['pred_logits'] = outputs_class[-1]
         out['pred_boxes'] = outputs_coord[-1]
         out['pred_3d_dim'] = outputs_3d_dim[-1]
         out['pred_depth'] = outputs_depth[-1]
         out['pred_angle'] = outputs_angle[-1]
+        out['pred_height_bin'] = outputs_height_bin[-1]
         out['pred_depth_map_logits'] = pred_depth_map_logits
         out['pred_region_prob'] = region_probs
 
         out['inter_outputs'] = self._set_inter_loss(inter_class, inter_coord)
-        
+
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(
-                outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth) 
-        
+                outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth, outputs_height_bin)
+
         return out
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth):
-        # this is a workaround to make torchscript happy, as torchscript
-        # doesn't support dictionary with non-homogeneous values, such
-        # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b, 
-                 'pred_3d_dim': c, 'pred_angle': d, 'pred_depth': e}
-                for a, b, c, d, e in zip(outputs_class[:-1], outputs_coord[:-1],
-                                         outputs_3d_dim[:-1], outputs_angle[:-1], outputs_depth[:-1])]
+    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth, outputs_height_bin):
+        return [{'pred_logits': a, 'pred_boxes': b,
+                 'pred_3d_dim': c, 'pred_angle': d, 'pred_depth': e, 'pred_height_bin': f}
+                for a, b, c, d, e, f in zip(outputs_class[:-1], outputs_coord[:-1],
+                                             outputs_3d_dim[:-1], outputs_angle[:-1],
+                                             outputs_depth[:-1], outputs_height_bin[:-1])]
     
     @torch.jit.unused
     def _set_inter_loss(self, outputs_class, outputs_coord):
@@ -423,11 +439,10 @@ class SetCriterion(nn.Module):
         losses['loss_depth'] = depth_loss.sum() / num_boxes 
         return losses  
     
-    def loss_dims(self, outputs, targets, indices, num_boxes):  
-
+    def loss_dims(self, outputs, targets, indices, num_boxes):
         idx = self._get_src_permutation_idx(indices)
-        src_dims = outputs['pred_3d_dim'][idx]
-        target_dims = torch.cat([t['size_3d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        src_dims = outputs['pred_3d_dim'][idx][:, 1:]  # W, L only
+        target_dims = torch.cat([t['size_3d'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:, 1:]
 
         dimension = target_dims.clone().detach()
         dim_loss = torch.abs(src_dims - target_dims)
@@ -437,6 +452,24 @@ class SetCriterion(nn.Module):
         dim_loss *= compensation_weight
         losses = {}
         losses['loss_dim'] = dim_loss.sum() / num_boxes
+        return losses
+
+    def loss_height_bins(self, outputs, targets, indices, num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        height_input = outputs['pred_height_bin'][idx].view(-1, NUM_HEIGHT_BINS * 2)
+        target_cls = torch.cat([t['height_bin'][i] for t, (_, i) in zip(targets, indices)], dim=0).view(-1).long()
+        target_res = torch.cat([t['height_res'][i] for t, (_, i) in zip(targets, indices)], dim=0).view(-1)
+
+        cls_loss = F.cross_entropy(height_input[:, :NUM_HEIGHT_BINS], target_cls, reduction='none')
+
+        res_preds = height_input[:, NUM_HEIGHT_BINS:]
+        cls_onehot = torch.zeros(target_cls.shape[0], NUM_HEIGHT_BINS, device=target_cls.device).scatter_(
+            dim=1, index=target_cls.view(-1, 1), value=1)
+        res_pred = torch.sum(res_preds * cls_onehot, 1)
+        reg_loss = F.l1_loss(res_pred, target_res, reduction='none')
+
+        losses = {}
+        losses['loss_height_bin'] = (cls_loss + reg_loss).sum() / num_boxes
         return losses
 
     def loss_angles(self, outputs, targets, indices, num_boxes):  
@@ -521,6 +554,7 @@ class SetCriterion(nn.Module):
             'depths': self.loss_depths,
             'dims': self.loss_dims,
             'angles': self.loss_angles,
+            'height_bins': self.loss_height_bins,
             'center': self.loss_3dcenter,
             'depth_map': self.loss_depth_map,
             'region': self.loss_region,
@@ -623,6 +657,7 @@ def build(cfg):
     weight_dict['loss_dim'] = cfg['dim_loss_coef']
     weight_dict['loss_angle'] = cfg['angle_loss_coef']
     weight_dict['loss_depth'] = cfg['depth_loss_coef']
+    weight_dict['loss_height_bin'] = cfg['height_bin_loss_coef']
     weight_dict['loss_center'] = cfg['3dcenter_loss_coef']
     weight_dict['loss_depth_map'] = cfg['depth_map_loss_coef']
     weight_dict['loss_region'] = cfg['region_loss_coef']
@@ -642,7 +677,7 @@ def build(cfg):
     weight_dict.update(inter_weight_dict)
         
     inter_losses = ['labels', 'boxes', 'center']
-    losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'angles', 'center', 'depth_map', 'region']
+    losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'angles', 'height_bins', 'center', 'depth_map', 'region']
 
     criterion = SetCriterion(
         cfg['num_classes'],

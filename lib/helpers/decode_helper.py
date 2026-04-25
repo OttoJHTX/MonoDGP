@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from lib.datasets.utils import class2angle
+from lib.models.monodgp.height_bins import NUM_HEIGHT_BINS, HEIGHT_BIN_CENTERS_TENSOR
 from utils import box_ops
 
 
@@ -73,6 +74,7 @@ def extract_dets_from_outputs(outputs, K=50, topk=50):
     
     heading = outputs['pred_angle']
     size_3d = outputs['pred_3d_dim']
+    height_bin = outputs['pred_height_bin']
     depth = outputs['pred_depth'][:, :, 0: 1]
     sigma = outputs['pred_depth'][:, :, 1: 2]
     sigma = torch.exp(-sigma)
@@ -81,13 +83,24 @@ def extract_dets_from_outputs(outputs, K=50, topk=50):
     # decode
     boxes = torch.gather(out_bbox, 1, topk_boxes.repeat(1, 1, 6))  # b, q', 6
 
-    xs3d = boxes[:, :, 0: 1] 
-    ys3d = boxes[:, :, 1: 2] 
+    xs3d = boxes[:, :, 0: 1]
+    ys3d = boxes[:, :, 1: 2]
 
     heading = torch.gather(heading, 1, topk_boxes.repeat(1, 1, 24))
     depth = torch.gather(depth, 1, topk_boxes)
-    sigma = torch.gather(sigma, 1, topk_boxes) 
+    sigma = torch.gather(sigma, 1, topk_boxes)
     size_3d = torch.gather(size_3d, 1, topk_boxes.repeat(1, 1, 3))
+    height_bin = torch.gather(height_bin, 1, topk_boxes.repeat(1, 1, NUM_HEIGHT_BINS * 2))
+
+    # hard-decode height from bin classification + residual
+    h_logits = height_bin[:, :, :NUM_HEIGHT_BINS]
+    h_residuals = height_bin[:, :, NUM_HEIGHT_BINS:]
+    bin_idx = h_logits.argmax(dim=-1)  # [B, topk]
+    centers = HEIGHT_BIN_CENTERS_TENSOR.to(h_logits.device)
+    sel_centers = centers[bin_idx]
+    sel_residuals = h_residuals.gather(2, bin_idx.unsqueeze(-1)).squeeze(-1)
+    size_3d = size_3d.clone()
+    size_3d[:, :, 0] = sel_centers + sel_residuals
 
     corner_2d = box_ops.box_cxcylrtb_to_xyxy(boxes)
 
