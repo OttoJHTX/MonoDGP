@@ -1,4 +1,6 @@
 import os
+import time
+import datetime
 import tqdm
 
 import torch
@@ -64,6 +66,7 @@ class Trainer(object):
         
     def train(self):
         start_epoch = self.epoch
+        train_start_time = time.time()
 
         progress_bar = tqdm.tqdm(range(start_epoch, self.cfg['max_epoch']), dynamic_ncols=True, leave=True, desc='epochs')
         best_result = self.best_result
@@ -111,6 +114,13 @@ class Trainer(object):
 
         self.logger.info("Best Result:{}, epoch:{}".format(best_result, best_epoch))
 
+        total_seconds = time.time() - train_start_time
+        elapsed = str(datetime.timedelta(seconds=int(total_seconds)))
+        num_epochs = self.cfg['max_epoch'] - start_epoch
+        self.logger.info(
+            "Total training time: {} ({:.1f}s over {} epoch(s))".format(
+                elapsed, total_seconds, num_epochs))
+
         return None
 
     def train_one_epoch(self, epoch):
@@ -118,7 +128,11 @@ class Trainer(object):
         self.model.train()
         print(">>>>>>> Epoch:", str(epoch) + ":")
 
-        progress_bar = tqdm.tqdm(total=len(self.train_loader), leave=(self.epoch+1 == self.cfg['max_epoch']), desc='iters')
+        accumulation_steps = self.cfg.get('accumulation_steps', 1)
+        num_batches = len(self.train_loader)
+
+        progress_bar = tqdm.tqdm(total=num_batches, leave=(self.epoch+1 == self.cfg['max_epoch']), desc='iters')
+        self.optimizer.zero_grad()
         for batch_idx, (inputs, calibs, targets, info) in enumerate(self.train_loader):
             inputs = inputs.to(self.device)
             calibs = calibs.to(self.device)
@@ -132,7 +146,6 @@ class Trainer(object):
                 dn_args=(targets, self.cfg['scalar'], self.cfg['label_noise_scale'], self.cfg['box_noise_scale'], self.cfg['num_patterns'])
             ###
             # train one batch
-            self.optimizer.zero_grad()
             outputs = self.model(inputs, calibs, targets, img_sizes, dn_args=dn_args)
             mask_dict=None
             #ipdb.set_trace()
@@ -166,8 +179,12 @@ class Trainer(object):
                 print("")
                 print("")
 
-            detr_losses.backward()
-            self.optimizer.step()
+            (detr_losses / accumulation_steps).backward()
+
+            is_last_batch = (batch_idx + 1) == num_batches
+            if ((batch_idx + 1) % accumulation_steps == 0) or is_last_batch:
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
             progress_bar.update()
         progress_bar.close()
