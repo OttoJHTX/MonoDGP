@@ -46,8 +46,8 @@ def main():
 
     # build model
     model, loss = build_model(cfg['model'])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu_ids = list(map(int, cfg['trainer']['gpu_ids'].split(',')))
+    device = torch.device(f"cuda:{gpu_ids[0]}" if torch.cuda.is_available() else "cpu")
 
     if len(gpu_ids) == 1:
         model = model.to(device)
