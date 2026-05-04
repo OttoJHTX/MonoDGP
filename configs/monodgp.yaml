@@ -103,12 +103,13 @@ lr_scheduler:
 
 
 trainer:
-  max_epoch: 20
+  max_epoch: 250
   gpu_ids: '1'
   save_frequency: 1  # checkpoint save interval (in epoch)
+  accumulation_steps: 2  # effective batch size = batch_size * accumulation_steps
   #resume_model: True
-  pretrain_model: 'outputs/monodgp/baseline/checkpoint.pth'
-  save_path: 'outputs/projection-alignment'
+  #pretrain_model: path/to/ckpt
+  save_path: 'outputs_local/projection-alignment-250'
   save_all: False  # False for only savng the best and latest ckpts
   use_dn: False
   scalar: 5
