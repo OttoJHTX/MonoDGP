@@ -171,7 +171,7 @@ class Trainer(object):
                 for key, val in detr_losses_dict_log.items():
                     if key == "loss_detr":
                         continue
-                    if "0" in key or "1" in key or "2" in key or "3" in key or "4" in key or "5" in key:
+                    if key[-1] in "012345":
                         if flags[int(key[-1])]:
                             print("")
                             flags[int(key[-1])] = False
