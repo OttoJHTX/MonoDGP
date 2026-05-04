@@ -603,9 +603,9 @@ class SetCriterion(nn.Module):
         proj_y1 = v_proj.min(dim=1).values / img_h  # [M]
         proj_y2 = v_proj.max(dim=1).values / img_h  # [M]
 
-        # --- Quadratic loss ---
-        loss_pa = ((box2d_x1 - proj_x1) ** 2 + (box2d_x2 - proj_x2) ** 2 +
-                   (box2d_y1 - proj_y1) ** 2 + (box2d_y2 - proj_y2) ** 2)
+        proj_box = torch.stack([proj_x1, proj_x2, proj_y1, proj_y2], dim=-1)
+        pred_box = torch.stack([box2d_x1, box2d_x2, box2d_y1, box2d_y2], dim=-1)
+        loss_pa = F.l1_loss(proj_box, pred_box, reduction='none')
 
         losses = {}
         losses['loss_proj_align'] = loss_pa.sum() / num_boxes
