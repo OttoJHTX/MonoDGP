@@ -439,7 +439,7 @@ class SetCriterion(nn.Module):
         losses['loss_dim'] = dim_loss.sum() / num_boxes
         return losses
 
-    def loss_height(self, outputs, targets, indices, num_boxes):
+    def loss_3d_height(self, outputs, targets, indices, num_boxes):
         """Auxiliary loss that specifically penalizes errors in predicted 3D height (H).
         H is critical for geometric depth: Z_geo = f * H / h_bbox.
         """
@@ -448,7 +448,18 @@ class SetCriterion(nn.Module):
         target_height = torch.cat([t['size_3d'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:, 0]  # GT H
 
         losses = {}
-        losses['loss_height'] = F.l1_loss(src_height, target_height, reduction='sum') / num_boxes
+        losses['loss_3d_height'] = F.l1_loss(src_height, target_height, reduction='sum') / num_boxes
+        return losses
+
+    def loss_2d_height(self, outputs, targets, indices, num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        # pred_boxes format: [cx_3d, cy_3d, l, r, t, b] — 2D height = t + b
+        src_2d_height = outputs['pred_boxes'][idx][:, 4] + outputs['pred_boxes'][idx][:, 5]
+        target_2d_height = torch.cat(
+            [t['boxes_3d'][i][:, 4] + t['boxes_3d'][i][:, 5] for t, (_, i) in zip(targets, indices)], dim=0)
+
+        losses = {}
+        losses['loss_2d_height'] = F.l1_loss(src_2d_height, target_2d_height, reduction='sum') / num_boxes
         return losses
 
     def loss_angles(self, outputs, targets, indices, num_boxes):
@@ -532,7 +543,8 @@ class SetCriterion(nn.Module):
             'boxes': self.loss_boxes,
             'depths': self.loss_depths,
             'dims': self.loss_dims,
-            'height': self.loss_height,
+            '3d_height': self.loss_3d_height,
+            '2d_height': self.loss_2d_height,
             'angles': self.loss_angles,
             'center': self.loss_3dcenter,
             'depth_map': self.loss_depth_map,
@@ -576,7 +588,7 @@ class SetCriterion(nn.Module):
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = self.matcher(aux_outputs, targets, group_num=group_num)
                 for loss in self.losses:
-                    if loss in ('depth_map', 'region', 'height'):
+                    if loss in ('depth_map', 'region', '3d_height', '2d_height'):
                         continue
                     kwargs = {}
                     if loss == 'labels':
@@ -637,7 +649,8 @@ def build(cfg):
     weight_dict['loss_angle'] = cfg['angle_loss_coef']
     weight_dict['loss_depth'] = cfg['depth_loss_coef']
     weight_dict['loss_center'] = cfg['3dcenter_loss_coef']
-    weight_dict['loss_height'] = cfg['height_loss_coef']
+    weight_dict['loss_3d_height'] = cfg['height_3d_loss_coef']
+    weight_dict['loss_2d_height'] = cfg['height_2d_loss_coef']
     weight_dict['loss_depth_map'] = cfg['depth_map_loss_coef']
     weight_dict['loss_region'] = cfg['region_loss_coef']
     
@@ -656,7 +669,7 @@ def build(cfg):
     weight_dict.update(inter_weight_dict)
         
     inter_losses = ['labels', 'boxes', 'center']
-    losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'height', 'angles', 'center', 'depth_map', 'region']
+    losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', '3d_height', '2d_height', 'angles', 'center', 'depth_map', 'region']
 
     criterion = SetCriterion(
         cfg['num_classes'],
