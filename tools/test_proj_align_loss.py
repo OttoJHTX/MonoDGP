@@ -96,28 +96,40 @@ def test_gradient_flow():
 
 def test_l1_not_l2():
     """
-    For L1: d|proj - box| / d(cx) = ±1, constant regardless of how far box is from projection.
-    For L2: d(proj - box)^2 / d(cx) = -2*(proj - box), grows linearly with error.
+    pred_boxes[..., 2] = l (2D left half-width) appears ONLY in box2d_x1 = cx - l.
+    It does NOT feed into the 3D projection (which uses pred_3d_dim for dimensions).
+    So d_loss/d_l is the pure gradient of one L1 term.
 
-    We check the gradient w.r.t. cx at a small offset and a large offset — they should be equal.
+    L1: |d_loss/d_l| = 1.0 regardless of how large the error is.
+    L2: |d_loss/d_l| = 2 * |proj_x1 - box2d_x1|, grows with error.
+
+    We pick two l values that place box2d_x1 on opposite sides of proj_x1
+    (~0.378 for the default camera/depth setup) to confirm both give gradient 1.0.
     """
-    def cx_gradient(box2d_cx):
-        loss, outputs = compute_loss(box2d_cx=box2d_cx)
-        loss.backward()
-        return outputs['pred_boxes'].grad[0, 0, 0].abs().item()  # |d_loss / d_cx|
+    def l_gradient(l_val):
+        criterion = make_criterion()
+        outputs = make_outputs()  # 3D params fixed; only pred_boxes changes
+        pred_boxes = torch.tensor(
+            [[[0.5, 0.5, l_val, 0.1, 0.1, 0.1]]],
+            dtype=torch.float32, requires_grad=True)
+        outputs['pred_boxes'] = pred_boxes
+        indices = [(torch.tensor([0]), torch.tensor([0]))]
+        result = criterion.loss_projection_alignment(outputs, targets=[], indices=indices, num_boxes=1.0)
+        result['loss_proj_align'].backward()
+        return pred_boxes.grad[0, 0, 2].abs().item()  # |d_loss / d_l|
 
-    grad_small_err = cx_gradient(box2d_cx=0.5 + 0.05)
-    grad_large_err = cx_gradient(box2d_cx=0.5 + 0.30)
+    # l=0.05 → box2d_x1=0.45  (right of proj_x1≈0.378, small error)
+    # l=0.40 → box2d_x1=0.10  (left  of proj_x1≈0.378, large error, opposite sign)
+    grad_small_err = l_gradient(0.05)
+    grad_large_err = l_gradient(0.40)
 
-    # L1: both should be equal (constant sign, not magnitude-dependent)
-    # L2: grad_large / grad_small would be 0.30/0.05 = 6
-    assert abs(grad_small_err - grad_large_err) < 0.01, (
-        f"L1 gradient should be constant w.r.t. cx offset, "
-        f"got {grad_small_err:.4f} (small error) vs {grad_large_err:.4f} (large error). "
-        f"L2 would give a ~6x difference."
-    )
-    print(f"  PASS test_l1_not_l2: |d_loss/d_cx| = {grad_small_err:.4f} (small) and "
-          f"{grad_large_err:.4f} (large) — constant confirms L1")
+    assert abs(grad_small_err - 1.0) < 0.01, \
+        f"L1 gradient w.r.t. l should be 1.0, got {grad_small_err:.4f}"
+    assert abs(grad_large_err - 1.0) < 0.01, \
+        f"L1 gradient w.r.t. l should be 1.0, got {grad_large_err:.4f}"
+    print(f"  PASS test_l1_not_l2: |d_loss/d_l| = {grad_small_err:.4f} (small error) and "
+          f"{grad_large_err:.4f} (large error) — both 1.0 confirms L1 "
+          f"(L2 would give ~0.14 and ~0.56)")
 
 
 def test_geometry_sanity():
