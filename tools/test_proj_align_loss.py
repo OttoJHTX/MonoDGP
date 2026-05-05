@@ -4,8 +4,9 @@ Unit tests for loss_projection_alignment on the projection-alignment branch.
 Tests:
   1. loss is a non-negative scalar
   2. gradients flow to all predicted quantities (pred_boxes, pred_3d_dim, pred_depth, pred_angle)
-  3. loss is L1 (not L2): doubling the 2D box offset doubles the loss
-  4. geometry sanity: a box far right has higher alignment error than the same box centred
+  3. loss is L1 (not L2): gradient w.r.t. box position is constant regardless of error size
+     (for L2, gradient ∝ error magnitude)
+  4. geometry sanity: a box far from the projection has higher loss than one close to it
 
 Run with:
   python tools/test_proj_align_loss.py
@@ -13,9 +14,7 @@ Run with:
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import math
 import torch
-from unittest.mock import MagicMock
 from lib.models.monodgp.monodgp import SetCriterion
 
 
@@ -34,24 +33,26 @@ def make_outputs(box2d_cx=0.5, device='cpu'):
     Camera: fu=fv=700, cu=640, cv=180, image 1280x360.
     Object: Z=10m, dims H=1.5 W=2.0 L=4.0, ry~0 (uniform angle logits).
     """
-    B, Q = 1, 1
+    # Leaf tensors so .grad accumulates after backward()
+    pred_boxes = torch.tensor(
+        [[[box2d_cx, 0.5, 0.1, 0.1, 0.1, 0.1]]],
+        dtype=torch.float32, device=device, requires_grad=True)   # [1, 1, 6]
 
-    pred_boxes_val = torch.tensor([[box2d_cx, 0.5, 0.1, 0.1, 0.1, 0.1]], device=device)  # [1, 6]
-    pred_boxes = pred_boxes_val.unsqueeze(0).requires_grad_(True)   # [1, 1, 6]
+    pred_3d_dim = torch.tensor(
+        [[[1.5, 2.0, 4.0]]],
+        dtype=torch.float32, device=device, requires_grad=True)   # [1, 1, 3]
 
-    pred_3d_dim_val = torch.tensor([[1.5, 2.0, 4.0]], device=device)
-    pred_3d_dim = pred_3d_dim_val.unsqueeze(0).requires_grad_(True)  # [1, 1, 3]
+    pred_depth = torch.tensor(
+        [[[10.0, 1.0]]],
+        dtype=torch.float32, device=device, requires_grad=True)   # [1, 1, 2]
 
-    pred_depth_val = torch.tensor([[10.0, 1.0]], device=device)
-    pred_depth = pred_depth_val.unsqueeze(0).requires_grad_(True)    # [1, 1, 2]
+    pred_angle = torch.zeros(1, 1, 24, dtype=torch.float32, device=device, requires_grad=True)
 
-    pred_angle = torch.zeros(B, Q, 24, device=device, requires_grad=True)
-
-    calibs = torch.zeros(B, 3, 4, device=device)
-    calibs[0, 0, 0] = 700.0
-    calibs[0, 1, 1] = 700.0
-    calibs[0, 0, 2] = 640.0
-    calibs[0, 1, 2] = 180.0
+    calibs = torch.zeros(1, 3, 4, device=device)
+    calibs[0, 0, 0] = 700.0  # fu
+    calibs[0, 1, 1] = 700.0  # fv
+    calibs[0, 0, 2] = 640.0  # cu
+    calibs[0, 1, 2] = 180.0  # cv
 
     img_sizes = torch.tensor([[1280.0, 360.0]], device=device)
 
@@ -65,17 +66,15 @@ def make_outputs(box2d_cx=0.5, device='cpu'):
     }
 
 
-def make_indices():
-    return [(torch.tensor([0]), torch.tensor([0]))]
-
-
 def compute_loss(box2d_cx=0.5):
     criterion = make_criterion()
     outputs = make_outputs(box2d_cx=box2d_cx)
-    indices = make_indices()
+    indices = [(torch.tensor([0]), torch.tensor([0]))]
     result = criterion.loss_projection_alignment(outputs, targets=[], indices=indices, num_boxes=1.0)
     return result['loss_proj_align'], outputs
 
+
+# ---------------------------------------------------------------------------
 
 def test_non_negative():
     loss, _ = compute_loss()
@@ -96,29 +95,39 @@ def test_gradient_flow():
 
 
 def test_l1_not_l2():
-    """L1: doubling the offset doubles the loss. L2 would quadruple it."""
-    base_cx = 0.5
-    offset = 0.1
+    """
+    For L1: d|proj - box| / d(cx) = ±1, constant regardless of how far box is from projection.
+    For L2: d(proj - box)^2 / d(cx) = -2*(proj - box), grows linearly with error.
 
-    loss1, _ = compute_loss(box2d_cx=base_cx + offset)
-    loss2, _ = compute_loss(box2d_cx=base_cx + 2 * offset)
+    We check the gradient w.r.t. cx at a small offset and a large offset — they should be equal.
+    """
+    def cx_gradient(box2d_cx):
+        loss, outputs = compute_loss(box2d_cx=box2d_cx)
+        loss.backward()
+        return outputs['pred_boxes'].grad[0, 0, 0].abs().item()  # |d_loss / d_cx|
 
-    ratio = loss2.item() / loss1.item()
-    assert abs(ratio - 2.0) < 0.05, (
-        f"Expected L1 scaling (ratio~2.0), got {ratio:.4f}. "
-        f"L2 would give ratio~4.0."
+    grad_small_err = cx_gradient(box2d_cx=0.5 + 0.05)
+    grad_large_err = cx_gradient(box2d_cx=0.5 + 0.30)
+
+    # L1: both should be equal (constant sign, not magnitude-dependent)
+    # L2: grad_large / grad_small would be 0.30/0.05 = 6
+    assert abs(grad_small_err - grad_large_err) < 0.01, (
+        f"L1 gradient should be constant w.r.t. cx offset, "
+        f"got {grad_small_err:.4f} (small error) vs {grad_large_err:.4f} (large error). "
+        f"L2 would give a ~6x difference."
     )
-    print(f"  PASS test_l1_not_l2: loss(2x offset)/loss(1x offset) = {ratio:.4f} (expected ~2.0)")
+    print(f"  PASS test_l1_not_l2: |d_loss/d_cx| = {grad_small_err:.4f} (small) and "
+          f"{grad_large_err:.4f} (large) — constant confirms L1")
 
 
 def test_geometry_sanity():
     """
     A box whose predicted 2D centre is far from the projected 3D centre
     should have higher loss than one that is close.
+    Projected 3D centre lands near cx~0.5 (image centre); offset by 0.4 should be worse.
     """
-    # projected 3D centre lands near cx~0.5 (centre of image)
     loss_near, _ = compute_loss(box2d_cx=0.5)
-    loss_far, _  = compute_loss(box2d_cx=0.05)  # 2D box shifted far left
+    loss_far,  _ = compute_loss(box2d_cx=0.1)
 
     assert loss_far.item() > loss_near.item(), (
         f"Box far from projection should have higher loss. "
