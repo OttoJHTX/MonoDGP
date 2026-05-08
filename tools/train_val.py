@@ -46,13 +46,13 @@ def main():
 
     # build model
     model, loss = build_model(cfg['model'])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu_ids = list(map(int, cfg['trainer']['gpu_ids'].split(',')))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if len(gpu_ids) == 1:
         model = model.to(device)
     else:
-        model = torch.nn.DataParallel(model, device_ids=gpu_ids).to(device)
+        model = torch.nn.DataParallel(model, device_ids=list(range(len(gpu_ids)))).to(device)
 
     if args.evaluate_only:
         logger.info('###################  Evaluation Only  ##################')
