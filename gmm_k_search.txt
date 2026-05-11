@@ -1,0 +1,81 @@
+GMM k-sweep on KITTI Car heights
+label_dir: C:\Users\sejeo\Documents\Uni\8. semester\Computer Vision\MonoDGP\KITTI\data_object_label_2\training\label_2
+clip percentiles: (1.0, 99.0)  n=28195
+======================================================================
+
+--- k=3 ---
+  BIC=-44151.81  AIC=-44217.79  log-likelihood=22116.89
+  Components:   #   Weight      Mean       Std
+                1    0.626    1.4524    0.0605
+                2    0.279    1.5949    0.0593
+                3    0.096    1.7708    0.0889
+  Bin edges  : ['1.5442', '1.7056']
+  Bin centers: ['1.4507', '1.6102', '1.7989']
+  Bin counts : [18181, 7749, 2265]
+
+  Paste into lib/models/monodgp/height_bins.py:
+    NUM_HEIGHT_BINS    = 3
+    HEIGHT_BIN_EDGES   = np.array([1.5442, 1.7056])
+    HEIGHT_BIN_CENTERS = np.array([1.4507, 1.6102, 1.7989])
+
+--- k=4 ---
+  BIC=-44141.41  AIC=-44232.12  log-likelihood=22127.06
+  Components:   #   Weight      Mean       Std
+                1    0.324    1.4113    0.0456
+                2    0.321    1.4939    0.0352
+                3    0.252    1.6028    0.0489
+                4    0.103    1.7648    0.0897
+  Bin edges  : ['1.4532', '1.5483', '1.6955']
+  Bin centers: ['1.4035', '1.4955', '1.6069', '1.7881']
+  Bin counts : [8854, 9327, 7472, 2542]
+
+  Paste into lib/models/monodgp/height_bins.py:
+    NUM_HEIGHT_BINS    = 4
+    HEIGHT_BIN_EDGES   = np.array([1.4532, 1.5483, 1.6955])
+    HEIGHT_BIN_CENTERS = np.array([1.4035, 1.4955, 1.6069, 1.7881])
+
+--- k=5 ---
+  BIC=-44241.24  AIC=-44356.69  log-likelihood=22192.35
+  Components:   #   Weight      Mean       Std
+                1    0.325    1.4114    0.0456
+                2    0.325    1.4943    0.0350
+                3    0.242    1.6012    0.0441
+                4    0.083    1.7339    0.0533
+                5    0.024    1.8843    0.0514
+  Bin edges  : ['1.4532', '1.5490', '1.6828', '1.8328']
+  Bin centers: ['1.4035', '1.4955', '1.6039', '1.7469', '1.8985']
+  Bin counts : [8854, 9327, 7211, 2210, 593]
+
+  Paste into lib/models/monodgp/height_bins.py:
+    NUM_HEIGHT_BINS    = 5
+    HEIGHT_BIN_EDGES   = np.array([1.4532, 1.5490, 1.6828, 1.8328])
+    HEIGHT_BIN_CENTERS = np.array([1.4035, 1.4955, 1.6039, 1.7469, 1.8985])
+
+--- k=6 ---
+  BIC=-44211.71  AIC=-44351.91  log-likelihood=22192.95
+  Components:   #   Weight      Mean       Std
+                1    0.274    1.4020    0.0418
+                2    0.336    1.4832    0.0318
+                3    0.172    1.5659    0.0305
+                4    0.128    1.6397    0.0335
+                5    0.066    1.7491    0.0438
+                6    0.024    1.8844    0.0505
+  Bin edges  : ['1.4405', '1.5329', '1.6064', '1.6991', '1.8303']
+  Bin centers: ['1.3966', '1.4874', '1.5694', '1.6427', '1.7546', '1.8985']
+  Bin counts : [7711, 9850, 4520, 3572, 1949, 593]
+
+  Paste into lib/models/monodgp/height_bins.py:
+    NUM_HEIGHT_BINS    = 6
+    HEIGHT_BIN_EDGES   = np.array([1.4405, 1.5329, 1.6064, 1.6991, 1.8303])
+    HEIGHT_BIN_CENTERS = np.array([1.3966, 1.4874, 1.5694, 1.6427, 1.7546, 1.8985])
+
+======================================================================
+SUMMARY
+     k           BIC           AIC       log-lik
+     3     -44151.81     -44217.79      22116.89
+     4     -44141.41     -44232.12      22127.06
+     5     -44241.24     -44356.69      22192.35 <-- best BIC
+     6     -44211.71     -44351.91      22192.95
+
+Best k by BIC : 5
+Best k by AIC : 5
